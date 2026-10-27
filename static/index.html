@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Search</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 16px; background: #fafafa; color: #222; }
+  h1 { font-size: 1.4rem; }
+  form { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
+  button { padding: 8px 16px; cursor: pointer; }
+  #camera { display: none; margin-bottom: 16px; }
+  #video { max-width: 100%; max-height: 360px; border-radius: 6px; transform: scaleX(-1); display: block; margin-bottom: 8px; }
+  #preview { max-height: 200px; display: none; margin-bottom: 16px; border-radius: 6px; }
+  #status { margin-bottom: 16px; }
+  .error { color: #b00020; }
+  #results { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; }
+  .card img { width: 100%; height: 200px; object-fit: cover; display: block; }
+  .card div { padding: 6px 8px; font-size: 0.85rem; word-break: break-all; }
+  #viewer { padding: 0; border: none; border-radius: 6px; max-width: 92vw; max-height: 92vh; background: #111; }
+  #viewer::backdrop { background: rgba(0, 0, 0, 0.75); }
+  #viewer-inner { position: relative; }
+  #viewer img { display: block; max-width: 92vw; max-height: calc(92vh - 36px); }
+  #viewer-caption { color: #eee; font-size: 0.85rem; padding: 8px 12px; }
+  #viewer-close { position: absolute; top: 8px; right: 8px; border: none; border-radius: 50%; width: 36px; height: 36px; padding: 0; font-size: 1.3rem; background: rgba(0, 0, 0, 0.6); color: #fff; }
+</style>
+</head>
+<body>
+<h1>Face Search</h1>
+<form id="form">
+  <input type="file" id="file" accept="image/*">
+  <button type="submit">Search</button>
+  <button type="button" id="open-camera">Use camera</button>
+  <label>Max results <input type="number" id="topk" value="10" min="1" max="50" style="width:4em"></label>
+</form>
+<div id="camera">
+  <video id="video" autoplay playsinline muted></video>
+  <button type="button" id="capture">Capture &amp; search</button>
+  <button type="button" id="close-camera">Cancel</button>
+</div>
+<img id="preview" alt="Query photo">
+<div id="status"></div>
+<div id="results"></div>
+<dialog id="viewer">
+  <div id="viewer-inner">
+    <button type="button" id="viewer-close" aria-label="Close">&times;</button>
+    <img id="viewer-img" alt="">
+    <div id="viewer-caption"></div>
+  </div>
+</dialog>
+
+<script>
+const form = document.getElementById("form");
+const fileInput = document.getElementById("file");
+const preview = document.getElementById("preview");
+const status = document.getElementById("status");
+const results = document.getElementById("results");
+const camera = document.getElementById("camera");
+const video = document.getElementById("video");
+let stream = null;
+
+function showPreview(blob) {
+  preview.src = URL.createObjectURL(blob);
+  preview.style.display = "block";
+}
+
+function showError(message) {
+  status.className = "error";
+  status.textContent = message;
+}
+
+async function search(blob) {
+  results.innerHTML = "";
+  status.className = "";
+  status.textContent = "Searching… (takes a few seconds)";
+
+  const body = new FormData();
+  body.append("file", blob, "query.jpg");
+  const topK = document.getElementById("topk").value;
+
+  try {
+    const response = await fetch(`/search?top_k=${topK}`, { method: "POST", body });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `Error ${response.status}`);
+
+    status.textContent = data.length ? `${data.length} matching photo(s), most similar first` : "No matching photos found.";
+    for (const match of data) {
+      const card = document.createElement("div");
+      card.className = "card";
+      const link = document.createElement("a");
+      link.href = `/images/${encodeURIComponent(match.filename)}`;
+      const img = document.createElement("img");
+      img.src = link.href;
+      img.loading = "lazy";
+      link.append(img);
+      const caption = document.createElement("div");
+      caption.textContent = `${match.filename} — similarity ${Math.round((1 - match.distance) * 100)}%`;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        openViewer(link.href, caption.textContent);
+      });
+      card.append(link, caption);
+      results.append(card);
+    }
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+const viewer = document.getElementById("viewer");
+
+function openViewer(src, caption) {
+  document.getElementById("viewer-img").src = src;
+  document.getElementById("viewer-caption").textContent = caption;
+  viewer.showModal();
+}
+
+document.getElementById("viewer-close").addEventListener("click", () => viewer.close());
+// A click outside the photo lands on the dialog itself (its backdrop), so close then
+viewer.addEventListener("click", (event) => {
+  if (event.target === viewer) viewer.close();
+});
+
+function closeCamera() {
+  if (stream) stream.getTracks().forEach((track) => track.stop());
+  stream = null;
+  camera.style.display = "none";
+}
+
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) showPreview(fileInput.files[0]);
+});
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!fileInput.files[0]) return showError("Choose a photo first, or use the camera.");
+  search(fileInput.files[0]);
+});
+
+document.getElementById("open-camera").addEventListener("click", async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+    video.srcObject = stream;
+    camera.style.display = "block";
+    status.className = "";
+    status.textContent = "Look at the camera, then click Capture & search.";
+  } catch (err) {
+    showError(`Couldn't open the camera: ${err.message}`);
+  }
+});
+
+document.getElementById("capture").addEventListener("click", () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  closeCamera();
+  canvas.toBlob((blob) => {
+    showPreview(blob);
+    search(blob);
+  }, "image/jpeg", 0.92);
+});
+
+document.getElementById("close-camera").addEventListener("click", closeCamera);
+</script>
+</body>
+</html>
